@@ -188,3 +188,180 @@ root@servidor:~$ ./matrix-usb.sh
 -IP detectada: 203.45.67.89
 💾 Datos en: /mnt/usb-matrix/matrix-data
 ✅ Matrix funcionando en: https://203.45.67.89
+
+
+
+
+## Como se conservan los datos?
+
+¡Excelente pregunta! Te explico **exactamente** cómo se configuró la persistencia de la base de datos PostgreSQL:
+
+## 🔧 **Configuración de persistencia en el script:**
+
+### 1. **Volúmenes Docker mapeados:**
+```yaml
+# En docker-compose.yml:
+postgresql:
+  image: postgres:15-alpine
+  volumes:
+    - $DATA_DIR/postgresql:/var/lib/postgresql/data  ← CLAVE
+```
+
+**Explicación:**
+- `$DATA_DIR/postgresql` = Carpeta en el USB
+- `/var/lib/postgresql/data` = Donde PostgreSQL guarda datos dentro del contenedor
+- **Mapeo:** Los datos del contenedor se guardan en el USB
+
+### 2. **Estructura de datos en el USB:**
+```bash
+USB/
+└── matrix-data/
+    ├── postgresql/           ← Base de datos PostgreSQL
+    │   ├── base/            ← Tablas y datos
+    │   ├── global/          ← Configuración global
+    │   ├── pg_wal/          ← Write-Ahead Logs
+    │   ├── pg_tblspc/       ← Tablespaces
+    │   └── postgresql.conf  ← Configuración
+    ├── synapse/             ← Configuración Matrix
+    └── ssl/                 ← Certificados
+```
+
+### 3. **Variables de entorno que conectan todo:**
+```yaml
+# PostgreSQL container:
+environment:
+  POSTGRES_DB: synapse           ← Base de datos
+  POSTGRES_USER: synapse_user    ← Usuario
+  POSTGRES_PASSWORD: usb_matrix_2024  ← Contraseña
+
+# Matrix container:
+database:
+  name: psycopg2
+  args:
+    user: synapse_user
+    password: usb_matrix_2024
+    database: synapse
+    host: postgresql             ← Nombre del contenedor
+    port: 5432
+```
+
+## 💾 **Qué datos específicos se conservan:**
+
+### **En PostgreSQL (`postgresql/` folder):**
+```sql
+-- Tablas principales que persisten:
+users                 -- Usuarios registrados
+rooms                 -- Salas/canales
+room_memberships      -- Miembros de salas
+events                -- Mensajes y eventos
+media_repository      -- Archivos subidos
+device_lists          -- Dispositivos conectados
+access_tokens         -- Tokens de sesión
+```
+
+### **En Matrix Synapse (`synapse/` folder):**
+```
+homeserver.yaml       -- Configuración principal
+signing.key          -- Clave criptográfica del servidor
+media_store/         -- Archivos multimedia
+```
+
+## 🔄 **Flujo de persistencia:**
+
+### **Primera ejecución (USB nuevo):**
+```bash
+# 1. Se crea estructura vacía
+mkdir -p $DATA_DIR/postgresql
+
+# 2. PostgreSQL inicializa base de datos
+docker run postgres:15-alpine  # Crea tablas iniciales
+
+# 3. Matrix configura esquema
+docker run matrixdotorg/synapse generate  # Crea homeserver.yaml
+```
+
+### **Ejecuciones posteriores (USB usado):**
+```bash
+# 1. Detecta datos existentes
+if [ -f $DATA_DIR/synapse/homeserver.yaml ]; then
+    echo "🔄 Cargando configuración existente..."
+
+# 2. Monta volúmenes existentes
+docker-compose up -d  # Usa datos del USB
+
+# 3. PostgreSQL lee datos existentes
+# 4. Matrix usa configuración existente
+```
+
+## 🎯 **Verificación de persistencia:**
+
+```bash
+# Ver datos de PostgreSQL en el USB
+ls -la /media/pablety/MATRIX-USB/matrix-data/postgresql/
+# Deberías ver: base/ global/ pg_wal/ postgresql.conf
+
+# Ver usuarios en la base de datos
+docker exec -it matrix-usb-postgres psql -U synapse_user -d synapse
+# Dentro de PostgreSQL:
+SELECT name FROM users;  -- Ver usuarios registrados
+SELECT room_id FROM rooms;  -- Ver salas
+```
+
+## 🔍 **Configuración técnica detallada:**
+
+### **Docker Compose volumes:**
+```yaml
+services:
+  postgresql:
+    volumes:
+      # HOST_PATH:CONTAINER_PATH
+      - $DATA_DIR/postgresql:/var/lib/postgresql/data
+    # Esto hace que PostgreSQL escriba en el USB
+
+  synapse:
+    volumes:
+      - $DATA_DIR/synapse:/data
+    # Esto hace que Matrix lea/escriba config en el USB
+```
+
+### **Configuración PostgreSQL:**
+```yaml
+# En homeserver.yaml (generado automáticamente):
+database:
+  name: psycopg2
+  args:
+    user: synapse_user
+    password: usb_matrix_2024
+    database: synapse
+    host: postgresql  # Nombre del contenedor
+    port: 5432
+    # Todos los datos van a /var/lib/postgresql/data
+    # Que está mapeado al USB
+```
+
+## 🚀 **¿Por qué funciona entre computadoras?**
+
+1. **Datos en USB:** Todo está en el USB, no en el disco duro
+2. **Contenedores idénticos:** Mismo PostgreSQL, mismo Matrix
+3. **Configuración portátil:** IP se detecta automáticamente
+4. **Volúmenes mapeados:** Docker siempre mira al USB
+
+## 🎮 **Ejemplo práctico:**
+
+### **En casa (IP: 192.168.1.100):**
+```bash
+# Crear usuario
+docker exec -it matrix-usb-synapse register_new_matrix_user
+# Usuario: pablety
+# Datos guardados en: USB/matrix-data/postgresql/base/
+```
+
+### **En oficina (IP: 10.0.0.50):**
+```bash
+# Mismo USB, nueva computadora
+sudo ./matrix-usb.sh
+# Matrix se inicia con IP 10.0.0.50
+# Pero los datos están ahí: usuario pablety existe
+```
+
+**La clave es que PostgreSQL siempre lee/escribe en la misma carpeta del USB, sin importar en qué computadora esté.** 🎯
