@@ -181,3 +181,10 @@ sudo systemctl stop apache2 nginx
 4. **Espera 10-15 minutos** (descarga Docker + configuración)
 5. **¡USB Matrix listo!**
 
+EJ:
+root@servidor:~$ cd /mnt/usb-matrix
+root@servidor:~$ ./matrix-usb.sh
+-Matrix USB Docker Portable  
+-IP detectada: 203.45.67.89
+💾 Datos en: /mnt/usb-matrix/matrix-data
+✅ Matrix funcionando en: https://203.45.67.89
