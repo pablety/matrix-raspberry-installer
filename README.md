@@ -66,7 +66,7 @@ sudo -u postgres psql -d synapse -c "SELECT name FROM users;"
 sudo matrix-stats.sh  # (si incluiste este script)
 
 
-Usar script para crear el USB portable. Te muestro exactamente cómo:
+Usar script para crear el USB portable
 
 ## 🚀 Pasos para crear tu USB Matrix Portable:
 
@@ -177,7 +177,7 @@ sudo systemctl stop apache2 nginx
 
 1. **Conecta tu USB**
 2. **Identifica el dispositivo** (`lsblk`)
-3. **Ejecuta el script** (`sudo ./matrix-usb-docker-portable.sh /dev/sdX`)
+3. **Ejecuta el script** (`sudo ./matrix-portable.sh /dev/sdX`)
 4. **Espera 10-15 minutos** (descarga Docker + configuración)
 5. **¡USB Matrix listo!**
 
