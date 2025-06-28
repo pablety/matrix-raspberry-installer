@@ -100,7 +100,10 @@ sudo apt install -y \
     wget \
     curl \
     git \
-    htop
+    htop \
+    postgresql \
+    postgresql-contrib \
+    openssl
 
 log_success "Dependencias instaladas"
 
@@ -119,6 +122,58 @@ sudo mkdir -p $MATRIX_HOME
 sudo chown $MATRIX_USER:nogroup $MATRIX_HOME
 log_success "Directorio $MATRIX_HOME creado"
 
+# Configurar PostgreSQL
+log "Configurando PostgreSQL para Matrix Synapse..."
+
+# Iniciar y habilitar PostgreSQL
+sudo systemctl start postgresql
+sudo systemctl enable postgresql
+
+# Crear usuario y base de datos para Matrix
+DB_PASSWORD=$(openssl rand -hex 16)
+sudo -u postgres psql << EOF
+CREATE USER matrix WITH PASSWORD '$DB_PASSWORD';
+CREATE DATABASE matrix_synapse OWNER matrix;
+ALTER DATABASE matrix_synapse SET TIME ZONE 'UTC';
+\q
+EOF
+
+# Optimizar PostgreSQL para Raspberry Pi
+log "Optimizando PostgreSQL para Raspberry Pi..."
+sudo tee -a /etc/postgresql/*/main/postgresql.conf > /dev/null << 'EOF'
+
+# Optimizaciones para Raspberry Pi
+max_connections = 20
+shared_buffers = 128MB
+effective_cache_size = 512MB
+maintenance_work_mem = 32MB
+checkpoint_completion_target = 0.9
+wal_buffers = 16MB
+default_statistics_target = 100
+random_page_cost = 1.1
+effective_io_concurrency = 200
+work_mem = 8MB
+min_wal_size = 1GB
+max_wal_size = 4GB
+EOF
+
+# Reiniciar PostgreSQL para aplicar configuración
+sudo systemctl restart postgresql
+
+# Crear archivo con credenciales de base de datos
+sudo tee /opt/matrix/db_config.txt > /dev/null << EOF
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=matrix_synapse
+DB_USER=matrix
+DB_PASSWORD=$DB_PASSWORD
+EOF
+
+sudo chmod 600 /opt/matrix/db_config.txt
+sudo chown matrix:nogroup /opt/matrix/db_config.txt
+
+log_success "PostgreSQL configurado y optimizado"
+
 # Instalar Matrix Synapse
 log "Instalando Matrix Synapse (esto tardará varios minutos)..."
 sudo -u $MATRIX_USER bash << EOF
@@ -127,7 +182,7 @@ if [ ! -d "env" ]; then
     python3 -m venv env
     source env/bin/activate
     pip install --upgrade pip setuptools wheel
-    pip install matrix-synapse[all]
+    pip install matrix-synapse[all] psycopg2-binary
     
     # Generar configuración
     python -m synapse.app.homeserver \\
@@ -148,6 +203,9 @@ log_success "Matrix Synapse instalado"
 log "Configurando Matrix para red local..."
 sudo -u $MATRIX_USER cp $MATRIX_HOME/homeserver.yaml $MATRIX_HOME/homeserver.yaml.backup
 
+# Cargar credenciales de base de datos
+source /opt/matrix/db_config.txt
+
 # Modificar configuración
 sudo -u $MATRIX_USER tee $MATRIX_HOME/homeserver.yaml > /dev/null << EOF
 # Matrix Synapse Configuration for Local Network
@@ -165,9 +223,15 @@ listeners:
         compress: false
 
 database:
-  name: sqlite3
+  name: psycopg2
   args:
-    database: $MATRIX_HOME/homeserver.db
+    user: matrix
+    password: $DB_PASSWORD
+    database: matrix_synapse
+    host: localhost
+    port: 5432
+    cp_min: 5
+    cp_max: 10
 
 log_config: "$MATRIX_HOME/matrix-chat.local.log.config"
 media_store_path: $MATRIX_HOME/media_store
@@ -294,15 +358,46 @@ EOF
 
 log_success "mDNS configurado"
 
+# Generar certificados SSL autofirmados
+log "Generando certificados SSL autofirmados..."
+sudo mkdir -p /etc/ssl/matrix
+sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+    -keyout /etc/ssl/matrix/matrix-chat.key \
+    -out /etc/ssl/matrix/matrix-chat.crt \
+    -subj "/C=ES/ST=Local/L=Local/O=Matrix Chat/OU=IT Department/CN=matrix-chat.local" \
+    -addext "subjectAltName=DNS:matrix-chat.local,DNS:$HOSTNAME.local,IP:$LOCAL_IP,DNS:localhost"
+
+sudo chmod 600 /etc/ssl/matrix/matrix-chat.key
+sudo chmod 644 /etc/ssl/matrix/matrix-chat.crt
+
+log_success "Certificados SSL generados"
+
 # Configurar Nginx
 log "Configurando Nginx..."
 sudo tee /etc/nginx/sites-available/matrix-local > /dev/null << EOF
 # Matrix Synapse + Element Web Configuration
-# Local Network Setup
+# Local Network Setup with HTTPS
 
+# HTTP server - redirect to HTTPS
 server {
     listen 80;
     server_name matrix-chat.local $HOSTNAME.local $LOCAL_IP localhost *.local;
+    return 301 https://\$server_name\$request_uri;
+}
+
+# HTTPS server
+server {
+    listen 443 ssl http2;
+    server_name matrix-chat.local $HOSTNAME.local $LOCAL_IP localhost *.local;
+    
+    # SSL Configuration
+    ssl_certificate /etc/ssl/matrix/matrix-chat.crt;
+    ssl_certificate_key /etc/ssl/matrix/matrix-chat.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
     
     # Security headers
     add_header X-Frame-Options DENY;
@@ -388,7 +483,7 @@ sudo tee $ELEMENT_PATH/config.json > /dev/null << EOF
 {
     "default_server_config": {
         "m.homeserver": {
-            "base_url": "http://matrix-chat.local",
+            "base_url": "https://matrix-chat.local",
             "server_name": "matrix-chat.local"
         },
         "m.identity_server": {
@@ -410,7 +505,7 @@ sudo tee $ELEMENT_PATH/config.json > /dev/null << EOF
         "servers": []
     },
     "enable_presence_by_hs_url": {
-        "http://matrix-chat.local": false
+        "https://matrix-chat.local": false
     },
     "terms_and_conditions_links": [],
     "privacy_policy_links": [],
@@ -508,7 +603,7 @@ sudo systemctl restart nginx
 # Verificar estado de servicios
 log "Verificando estado de servicios..."
 
-services=("matrix-synapse" "nginx" "avahi-daemon")
+services=("postgresql" "matrix-synapse" "nginx" "avahi-daemon")
 all_ok=true
 
 for service in "${services[@]}"; do
@@ -520,18 +615,133 @@ for service in "${services[@]}"; do
     fi
 done
 
+# Crear herramientas de backup y mantenimiento
+log "Creando herramientas de backup y mantenimiento..."
+
+# Script de backup de PostgreSQL
+sudo tee /usr/local/bin/matrix-backup.sh > /dev/null << 'EOF'
+#!/bin/bash
+# Matrix PostgreSQL Backup Script
+
+BACKUP_DIR="/opt/matrix/backups"
+DATE=$(date +%Y%m%d_%H%M%S)
+source /opt/matrix/db_config.txt
+
+# Crear directorio de backup
+mkdir -p $BACKUP_DIR
+
+# Backup de base de datos
+PGPASSWORD=$DB_PASSWORD pg_dump -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME > "$BACKUP_DIR/matrix_db_$DATE.sql"
+
+# Backup de configuración
+tar -czf "$BACKUP_DIR/matrix_config_$DATE.tar.gz" /opt/matrix/homeserver.yaml /opt/matrix/*.log.config /var/www/element/config.json 2>/dev/null
+
+# Limpiar backups antiguos (mantener 7 días)
+find $BACKUP_DIR -name "matrix_*.sql" -mtime +7 -delete
+find $BACKUP_DIR -name "matrix_*.tar.gz" -mtime +7 -delete
+
+echo "Backup completado: $BACKUP_DIR/matrix_db_$DATE.sql"
+EOF
+
+sudo chmod +x /usr/local/bin/matrix-backup.sh
+sudo chown root:root /usr/local/bin/matrix-backup.sh
+
+# Script de mantenimiento
+sudo tee /usr/local/bin/matrix-maintenance.sh > /dev/null << 'EOF'
+#!/bin/bash
+# Matrix Maintenance Script
+
+source /opt/matrix/db_config.txt
+
+echo "=== Matrix Synapse Maintenance ===="
+echo "Fecha: $(date)"
+
+# Estadísticas de base de datos
+echo -e "\n--- PostgreSQL Database Stats ---"
+PGPASSWORD=$DB_PASSWORD psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -c "
+SELECT 
+    schemaname,
+    tablename,
+    pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) as size
+FROM pg_tables 
+WHERE schemaname = 'public' 
+ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC 
+LIMIT 10;"
+
+# Estado de servicios
+echo -e "\n--- Service Status ---"
+for service in postgresql matrix-synapse nginx avahi-daemon; do
+    if systemctl is-active --quiet $service; then
+        echo "$service: ✓ Running"
+    else
+        echo "$service: ✗ Stopped"
+    fi
+done
+
+# Espacio en disco
+echo -e "\n--- Disk Usage ---"
+df -h /opt/matrix
+df -h /var/www/element
+
+# Logs recientes
+echo -e "\n--- Recent Matrix Logs ---"
+tail -n 5 /opt/matrix/homeserver.log
+
+echo -e "\n=== Maintenance Complete ==="
+EOF
+
+sudo chmod +x /usr/local/bin/matrix-maintenance.sh
+sudo chown root:root /usr/local/bin/matrix-maintenance.sh
+
+# Script de monitoreo
+sudo tee /usr/local/bin/matrix-monitor.sh > /dev/null << 'EOF'
+#!/bin/bash
+# Matrix Monitor Script
+
+source /opt/matrix/db_config.txt
+
+# Verificar conectividad
+if curl -s -k https://localhost/_matrix/client/versions > /dev/null; then
+    echo "$(date): Matrix API OK" >> /var/log/matrix-monitor.log
+else
+    echo "$(date): Matrix API ERROR" >> /var/log/matrix-monitor.log
+    systemctl restart matrix-synapse
+fi
+
+# Verificar PostgreSQL
+if PGPASSWORD=$DB_PASSWORD psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -c "SELECT 1;" > /dev/null 2>&1; then
+    echo "$(date): PostgreSQL OK" >> /var/log/matrix-monitor.log
+else
+    echo "$(date): PostgreSQL ERROR" >> /var/log/matrix-monitor.log
+    systemctl restart postgresql
+fi
+EOF
+
+sudo chmod +x /usr/local/bin/matrix-monitor.sh
+sudo chown root:root /usr/local/bin/matrix-monitor.sh
+
+# Configurar cron jobs para backup y monitoreo
+log "Configurando tareas automatizadas..."
+(sudo crontab -l 2>/dev/null; echo "0 2 * * * /usr/local/bin/matrix-backup.sh") | sudo crontab -
+(sudo crontab -l 2>/dev/null; echo "*/5 * * * * /usr/local/bin/matrix-monitor.sh") | sudo crontab -
+
+sudo mkdir -p /opt/matrix/backups
+sudo chown matrix:nogroup /opt/matrix/backups
+
+log_success "Herramientas de backup y mantenimiento configuradas"
+
 # Verificar conectividad
 log "Verificando conectividad..."
 sleep 3
 
-if curl -s http://localhost:8008/_matrix/client/versions > /dev/null; then
+if curl -s -k https://localhost/_matrix/client/versions > /dev/null; then
     log_success "Matrix Synapse responde correctamente"
 else
     log_error "Matrix Synapse no responde"
     all_ok=false
 fi
 
-if curl -s http://localhost/ > /dev/null; then
+if curl -s -k https://localhost/ > /dev/null; then
     log_success "Element Web accesible"
 else
     log_error "Element Web no accesible"
@@ -552,9 +762,9 @@ echo -e "${GREEN}║                                                            
 echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
 
 echo -e "\n${YELLOW}📋 INFORMACIÓN DE ACCESO:${NC}"
-echo -e "   🌐 URL Principal: ${GREEN}http://matrix-chat.local${NC}"
-echo -e "   🌐 URL por IP:    ${GREEN}http://$LOCAL_IP${NC}"
-echo -e "   🌐 URL Hostname:  ${GREEN}http://$HOSTNAME.local${NC}"
+echo -e "   🌐 URL Principal: ${GREEN}https://matrix-chat.local${NC}"
+echo -e "   🌐 URL por IP:    ${GREEN}https://$LOCAL_IP${NC}"
+echo -e "   🌐 URL Hostname:  ${GREEN}https://$HOSTNAME.local${NC}"
 
 echo -e "\n${YELLOW}👤 CREAR PRIMER USUARIO:${NC}"
 echo -e "   Ejecuta: ${GREEN}sudo -u matrix /opt/matrix/env/bin/register_new_matrix_user -c /opt/matrix/homeserver.yaml http://localhost:8008${NC}"
@@ -563,10 +773,22 @@ echo -e "\n${YELLOW}🔧 COMANDOS ÚTILES:${NC}"
 echo -e "   Ver logs:     ${GREEN}sudo journalctl -u matrix-synapse -f${NC}"
 echo -e "   Reiniciar:    ${GREEN}sudo systemctl restart matrix-synapse${NC}"
 echo -e "   Estado:       ${GREEN}sudo systemctl status matrix-synapse${NC}"
+echo -e "   Backup DB:    ${GREEN}/usr/local/bin/matrix-backup.sh${NC}"
+echo -e "   Mantenimiento:${GREEN}/usr/local/bin/matrix-maintenance.sh${NC}"
+echo -e "   Monitor:      ${GREEN}/usr/local/bin/matrix-monitor.sh${NC}"
+
+echo -e "\n${YELLOW}🗄️ BASE DE DATOS POSTGRESQL:${NC}"
+echo -e "   Host:         ${GREEN}localhost${NC}"
+echo -e "   Puerto:       ${GREEN}5432${NC}"
+echo -e "   Base de datos:${GREEN}matrix_synapse${NC}"
+echo -e "   Usuario:      ${GREEN}matrix${NC}"
+echo -e "   Config:       ${GREEN}/opt/matrix/db_config.txt${NC}"
 
 echo -e "\n${YELLOW}📁 UBICACIONES IMPORTANTES:${NC}"
 echo -e "   Config:       ${GREEN}/opt/matrix/homeserver.yaml${NC}"
 echo -e "   Logs:         ${GREEN}/opt/matrix/homeserver.log${NC}"
+echo -e "   Backups:      ${GREEN}/opt/matrix/backups/${NC}"
+echo -e "   SSL Certs:    ${GREEN}/etc/ssl/matrix/${NC}"
 echo -e "   Element:      ${GREEN}/var/www/element/${NC}"
 
 echo -e "\n${BLUE}🚀 ¡Tu servidor de chat local está listo para usar!${NC}"
