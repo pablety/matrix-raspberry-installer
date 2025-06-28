@@ -194,7 +194,7 @@ root@servidor:~$ ./matrix-usb.sh
 
 ## Como se conservan los datos?
 
-¡Excelente pregunta! Te explico **exactamente** cómo se configuró la persistencia de la base de datos PostgreSQL:
+cómo se configuró la persistencia de la base de datos PostgreSQL:
 
 ## 🔧 **Configuración de persistencia en el script:**
 
