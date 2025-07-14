@@ -100,7 +100,7 @@ log "📦 Installing Matrix Synapse and dependencies..."
 pip install --upgrade pip setuptools wheel
 
 # Install Matrix Synapse with SQLite support
-pip install matrix-synapse[sqlite] twisted[tls]
+pip install --timeout=120 matrix-synapse[sqlite] twisted[tls]
 
 log_success "Matrix Synapse installed"
 
