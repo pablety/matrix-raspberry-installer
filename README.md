@@ -1,4 +1,25 @@
 # matrix-installer
+
+## 🚀 Google Colab Installation (NEW!)
+**Run Matrix Synapse directly in Google Colab - No local setup required!**
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/pablety/matrix-raspberry-installer/blob/main/Matrix_Synapse_Colab.ipynb)
+
+- ✅ **No sudo required** - User-level installation  
+- ✅ **SQLite database** - No PostgreSQL complexity
+- ✅ **Element Web included** - Ready-to-use web interface  
+- ✅ **Google Drive persistence** - Save data between sessions
+- ✅ **Public tunneling** - Access from anywhere
+- ✅ **One-click setup** - Just run the notebook!
+
+### Manual Colab Installation
+```bash
+curl -fsSL https://raw.githubusercontent.com/pablety/matrix-raspberry-installer/main/install-matrix-colab.sh | bash
+```
+
+---
+
+## 🖥️ Traditional Linux Installation
 # Descargar y ejecutar en un solo comando
 curl -fsSL https://raw.githubusercontent.com/pablety/matrix-raspberry-installer/main/install-matrix-universal.sh | bash
 # Después de la instalación accedes por:
